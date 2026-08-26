@@ -25,6 +25,20 @@ import webbrowser
 from typing import Optional
 
 
+def log(msg: str = "") -> None:
+    print(msg, flush=True)
+
+
+# Beim eingefrorenen (PyInstaller-)Windows-Konsolen-Build ist stdout sonst oft
+# voll gepuffert statt zeilenweise - Ausgaben würden erst gebündelt erscheinen,
+# lange nachdem sie eigentlich passiert sind. Betrifft auch input()-Prompts,
+# die dadurch unsichtbar blieben, bevor das Programm auf Eingabe wartet.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:  # noqa: BLE001
+    pass
+
+
 def _app_data_dir() -> str:
     """Persistentes Datenverzeichnis, unabhängig vom PyInstaller-Temp-Ordner
     (der bei --onefile bei jedem Start neu und woanders angelegt wird)."""
@@ -63,12 +77,6 @@ DIFFICULTIES = [
     ("Normal", "Champion"),
     ("Heroic", "Hero"),
     ("Mythic", "Myth"),
-]
-
-SIMC_VERSIONS = [
-    ("weekly", "Weekly (stabiler Release, wöchentlich aktualisiert)"),
-    ("nightly", "Nightly (aktuellster Stand, geringe Bug-Chance)"),
-    ("latest", "Latest (jeder Commit, am wenigsten getestet)"),
 ]
 
 ITEMS_TO_SIM_TRUE_SELECTORS = [
@@ -114,7 +122,7 @@ def ensure_chromium_installed() -> None:
         if "Executable doesn't exist" not in str(e):
             raise
 
-    print("Chromium wird einmalig heruntergeladen (ca. 150-300 MB, kann ein paar Minuten dauern) ...")
+    log("Chromium wird einmalig heruntergeladen (ca. 150-300 MB, kann ein paar Minuten dauern) ...")
     import playwright.__main__ as pw_main
 
     old_argv = sys.argv
@@ -125,7 +133,7 @@ def ensure_chromium_installed() -> None:
         pass
     finally:
         sys.argv = old_argv
-    print("Chromium installiert.")
+    log("Chromium installiert.")
 
 
 def get_clipboard_text() -> str:
@@ -159,10 +167,10 @@ def get_clipboard_text() -> str:
 
 
 def ask_choice(prompt: str, options: list, default_index: int = 0) -> int:
-    print(prompt)
+    log(prompt)
     for i, label in enumerate(options, start=1):
         marker = " (Standard)" if i - 1 == default_index else ""
-        print(f"  {i}) {label}{marker}")
+        log(f"  {i}) {label}{marker}")
     while True:
         try:
             raw = input(f"Auswahl [1-{len(options)}, Enter für Standard]: ").strip()
@@ -172,7 +180,7 @@ def ask_choice(prompt: str, options: list, default_index: int = 0) -> int:
             return default_index
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return int(raw) - 1
-        print("Ungültige Eingabe, bitte erneut.")
+        log("Ungültige Eingabe, bitte erneut.")
 
 
 def wait_for_enter(prompt: str) -> None:
@@ -182,29 +190,24 @@ def wait_for_enter(prompt: str) -> None:
         pass
 
 
-def ask_yes_no(prompt: str, default: bool = True) -> bool:
-    suffix = "[J/n]" if default else "[j/N]"
-    while True:
-        try:
-            raw = input(f"{prompt} {suffix}: ").strip().lower()
-        except EOFError:
-            return default
-        if raw == "":
-            return default
-        if raw in ("j", "ja", "y", "yes"):
-            return True
-        if raw in ("n", "nein", "no"):
-            return False
-        print("Bitte mit j/n antworten.")
-
-
 def open_react_select(page, label_text):
     label = page.get_by_text(label_text, exact=False)
     control = label.locator(
         "xpath=following-sibling::div[1]//div[contains(@class,'-control')]"
     )
     control.click()
-    page.wait_for_timeout(300)
+    # Warten bis die Optionsliste tatsächlich befüllt ist, statt eine feste
+    # Zeit zu raten - sonst kann bei langsamem Nachladen (z.B. Item-Pool nach
+    # Schwierigkeitswechsel) die falsche/leere Option angeklickt werden.
+    page.locator("[role='option']").first.wait_for(state="visible", timeout=10000)
+
+
+def select_control_value(page, label_text) -> str:
+    label = page.get_by_text(label_text, exact=False)
+    control = label.locator(
+        "xpath=following-sibling::div[1]//div[contains(@class,'-control')]"
+    )
+    return control.inner_text().strip()
 
 
 def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, high_precision: bool) -> Optional[str]:
@@ -226,16 +229,16 @@ def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, hi
 
         page.on("response", on_response)
 
-        print("Öffne Raidbots Droptimizer ...")
+        log("Öffne Raidbots Droptimizer ...")
         page.goto(RAIDBOTS_URL, wait_until="networkidle", timeout=60000)
 
-        print("Füge SimC-Addon-Export aus der Zwischenablage ein ...")
+        log("Füge SimC-Addon-Export aus der Zwischenablage ein ...")
         editor = page.locator(".cm-content, .CodeMirror, [contenteditable='true']").first
         editor.click()
         page.keyboard.press("Control+A")
         page.keyboard.insert_text(simc_text)
 
-        print("Warte auf Charakter-Parsing ...")
+        log("Warte auf Charakter-Parsing ...")
         deadline = time.time() + 25
         loaded = False
         while time.time() < deadline:
@@ -243,8 +246,8 @@ def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, hi
             hit = next((p for p in FAILURE_PHRASES if p in body_text), None)
             if hit:
                 idx = body_text.find(hit)
-                print("Raidbots meldet einen Fehler beim Einlesen des Charakters:")
-                print(body_text[max(0, idx - 100) : idx + 300])
+                log("Raidbots meldet einen Fehler beim Einlesen des Charakters:")
+                log(body_text[max(0, idx - 100) : idx + 300])
                 browser.close()
                 return None
             if page.get_by_text("Sources", exact=True).count() > 0:
@@ -252,31 +255,43 @@ def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, hi
                 break
             page.wait_for_timeout(500)
         if not loaded:
-            print(
+            log(
                 "Zeitüberschreitung: Der Charakter wurde nicht rechtzeitig geladen. "
                 "Ist wirklich ein gültiger SimC-Addon-Export in der Zwischenablage?"
             )
             browser.close()
             return None
 
-        print("Wähle Quelle: aktuelle Season-Raids ...")
+        log("Wähle Quelle: aktuelle Season-Raids ...")
         page.get_by_text("Raids", exact=False).first.click()
         page.wait_for_timeout(600)
 
-        print(f"Wähle Schwierigkeitsgrad: {difficulty_label} ...")
+        log(f"Wähle Schwierigkeitsgrad: {difficulty_label} ...")
         page.get_by_text(difficulty_label, exact=True).click()
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(1000)
 
-        print("Konfiguriere 'Items to Sim' ...")
+        log("Konfiguriere 'Items to Sim' ...")
         for sel in ITEMS_TO_SIM_TRUE_SELECTORS:
             page.set_checked(sel, True, force=True, timeout=5000)
         for sel in ITEMS_TO_SIM_FALSE_SELECTORS:
             page.set_checked(sel, False, force=True, timeout=5000)
 
-        # Upgrade up to: höchstmögliches Level für die gewählte Schwierigkeit
-        open_react_select(page, "Upgrade up to:")
-        page.locator("[role='option']").first.click()
-        page.wait_for_timeout(300)
+        # Upgrade up to: höchstmögliches Level für die gewählte Schwierigkeit.
+        # Nach dem Klick verifizieren, dass sich der Wert wirklich geändert
+        # hat (nicht mehr "Base level, no upgrades") - sonst erneut versuchen.
+        for attempt in range(3):
+            open_react_select(page, "Upgrade up to:")
+            # "Base level, no upgrades" ist selbst als erste Option gelistet
+            # (weil 'Upgrade All Equipped Gear' an ist) - die muss raus, sonst
+            # würde .first genau das Gegenteil vom höchsten Level auswählen.
+            page.locator("[role='option']").filter(has_not_text="Base level").first.click()
+            page.wait_for_timeout(400)
+            current_value = select_control_value(page, "Upgrade up to:")
+            if "Base level" not in current_value:
+                break
+            log(f"Upgrade-Level wurde nicht übernommen ({current_value!r}), versuche erneut ...")
+        else:
+            log("WARNUNG: Konnte kein Upgrade-Level auswählen, bleibt bei Base level.")
 
         # Preferred Stats: Optionen live von der Seite lesen und abfragen
         open_react_select(page, "Preferred Stats:")
@@ -300,7 +315,7 @@ def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, hi
                 page.keyboard.press("Escape")
             page.wait_for_timeout(300)
 
-        print("Öffne 'Simulation Options' ...")
+        log("Öffne 'Simulation Options' ...")
         page.get_by_text("Simulation Options:", exact=False).click()
         page.wait_for_timeout(400)
         page.locator("#AdvancedSimOptions-showAllOptions").click()
@@ -316,7 +331,7 @@ def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, hi
 
         page.set_checked("#smartHighPrecision", high_precision, force=True, timeout=5000)
 
-        print("Starte Droptimizer-Simulation ...")
+        log("Starte Droptimizer-Simulation ...")
         page.get_by_role("button", name="Run Droptimizer").click()
 
         deadline = time.time() + 20
@@ -325,17 +340,17 @@ def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, hi
 
         if submit_response.get("status") != 200:
             body = submit_response.get("body")
-            print("FEHLER: Raidbots hat die Simulation abgelehnt.")
+            log("FEHLER: Raidbots hat die Simulation abgelehnt.")
             if isinstance(body, dict):
-                print(json.dumps(body, indent=2, ensure_ascii=False))
+                log(json.dumps(body, indent=2, ensure_ascii=False))
             browser.close()
             return None
 
         page.wait_for_timeout(1500)
         result_url = page.url
-        print(f"Simulation gestartet: {result_url}")
+        log(f"Simulation gestartet: {result_url}")
 
-        print("Warte auf Simulationsergebnis ...")
+        log("Warte auf Simulationsergebnis ...")
         deadline = time.time() + 10 * 60
         finished = False
         while time.time() < deadline:
@@ -345,12 +360,12 @@ def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, hi
             page.wait_for_timeout(2000)
 
         if not finished:
-            print("Zeitüberschreitung beim Warten auf das Ergebnis (Sim läuft evtl. noch).")
+            log("Zeitüberschreitung beim Warten auf das Ergebnis (Sim läuft evtl. noch).")
             browser.close()
-            print(f"Report-URL (später im Browser öffnen): {result_url}")
+            log(f"Report-URL (später im Browser öffnen): {result_url}")
             return None
 
-        print("Simulation fertig.")
+        log("Simulation fertig.")
         browser.close()
 
         try:
@@ -385,7 +400,7 @@ def upload_to_wowaudit(report_url: str) -> bool:
         page.goto(WOWAUDIT_URL, wait_until="networkidle", timeout=60000)
 
         if not really_logged_in(page):
-            print("Bitte im geöffneten Fenster bei wowaudit einloggen (Battle.net/Google) ...")
+            log("Bitte im geöffneten Fenster bei wowaudit einloggen (Battle.net/Google) ...")
             deadline = time.time() + 10 * 60
             stable_hits = 0
             logged_in = False
@@ -399,13 +414,13 @@ def upload_to_wowaudit(report_url: str) -> bool:
                 else:
                     stable_hits = 0
             if not logged_in:
-                print("Zeitüberschreitung: kein Login erkannt.")
+                log("Zeitüberschreitung: kein Login erkannt.")
                 context.close()
                 return False
             page.goto(WOWAUDIT_URL, wait_until="networkidle", timeout=60000)
             page.wait_for_timeout(1000)
 
-        print("Eingeloggt. Fülle Raidbots-Upload-Feld bei wowaudit ...")
+        log("Eingeloggt. Fülle Raidbots-Upload-Feld bei wowaudit ...")
         page.get_by_text("Wishlist for", exact=False).wait_for(timeout=20000)
         page.wait_for_timeout(500)
 
@@ -417,7 +432,7 @@ def upload_to_wowaudit(report_url: str) -> bool:
         go_button = page.get_by_role("button", name=re.compile("^go$", re.I))
         if go_button.count() == 0:
             page.screenshot(path=SCREENSHOT_PATH, full_page=True)
-            print(f"Konnte den 'Go'-Button bei wowaudit nicht finden. Screenshot: {SCREENSHOT_PATH}")
+            log(f"Konnte den 'Go'-Button bei wowaudit nicht finden. Screenshot: {SCREENSHOT_PATH}")
             context.close()
             return False
 
@@ -425,7 +440,7 @@ def upload_to_wowaudit(report_url: str) -> bool:
         target_input = container.locator("input[type='text']")
         if target_input.count() == 0:
             page.screenshot(path=SCREENSHOT_PATH, full_page=True)
-            print(f"Konnte das Raidbots-Upload-Feld bei wowaudit nicht finden. Screenshot: {SCREENSHOT_PATH}")
+            log(f"Konnte das Raidbots-Upload-Feld bei wowaudit nicht finden. Screenshot: {SCREENSHOT_PATH}")
             context.close()
             return False
 
@@ -440,18 +455,18 @@ def upload_to_wowaudit(report_url: str) -> bool:
         context.close()
 
         if uploaded:
-            print(f"Upload bei wowaudit erfolgreich. Screenshot: {SCREENSHOT_PATH}")
+            log(f"Upload bei wowaudit erfolgreich. Screenshot: {SCREENSHOT_PATH}")
             return True
         if rejected:
-            print(f"wowaudit hat den Report abgelehnt (Einstellungen passen nicht). Screenshot: {SCREENSHOT_PATH}")
+            log(f"wowaudit hat den Report abgelehnt (Einstellungen passen nicht). Screenshot: {SCREENSHOT_PATH}")
             return False
-        print(f"Unklarer Zustand nach dem Upload-Versuch bei wowaudit. Screenshot: {SCREENSHOT_PATH}")
+        log(f"Unklarer Zustand nach dem Upload-Versuch bei wowaudit. Screenshot: {SCREENSHOT_PATH}")
         return False
 
 
 def main() -> None:
-    print("=== Inithium Raidbots -> wowaudit Tool ===")
-    print()
+    log("=== Inithium Raidbots -> wowaudit Tool ===")
+    log()
 
     ensure_chromium_installed()
     simc_text = get_clipboard_text()
@@ -459,30 +474,27 @@ def main() -> None:
     diff_labels = [f"{a}/{b}" for a, b in DIFFICULTIES]
     difficulty_index = ask_choice("Schwierigkeitsgrad wählen:", diff_labels, default_index=2)
 
-    version_labels = [desc for _, desc in SIMC_VERSIONS]
-    version_index = ask_choice("SimC-Version wählen:", version_labels, default_index=1)
-    simc_version = SIMC_VERSIONS[version_index][0]
+    simc_version = "nightly"
+    high_precision = True
 
-    high_precision = ask_yes_no("High Precision (2x genauer, 4x langsamer) aktivieren?", default=True)
-
-    print()
+    log()
     result_url = run_droptimizer(simc_text, difficulty_index, simc_version, high_precision)
     if not result_url:
         wait_for_enter("\nFehlgeschlagen. Enter zum Beenden ...")
         sys.exit(1)
 
-    print()
-    print(f"Report-URL: {result_url}")
-    print()
-    print("Lade Report bei wowaudit hoch ...")
+    log()
+    log(f"Report-URL: {result_url}")
+    log()
+    log("Lade Report bei wowaudit hoch ...")
     ok = upload_to_wowaudit(result_url)
 
-    print()
+    log()
     if ok:
-        print("Fertig! Report wurde bei wowaudit für dein Team hochgeladen.")
+        log("Fertig! Report wurde bei wowaudit für dein Team hochgeladen.")
     else:
-        print("Der wowaudit-Upload hat nicht geklappt. Report-URL zum manuellen Einfügen:")
-        print(result_url)
+        log("Der wowaudit-Upload hat nicht geklappt. Report-URL zum manuellen Einfügen:")
+        log(result_url)
 
     wait_for_enter("\nEnter zum Beenden ...")
 
