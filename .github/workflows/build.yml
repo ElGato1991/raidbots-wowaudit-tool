@@ -1,0 +1,39 @@
+name: Build executables
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: raidbots-wowaudit-tool-linux
+            binary_path: dist/raidbots-wowaudit-tool
+          - os: windows-latest
+            artifact_name: raidbots-wowaudit-tool-windows
+            binary_path: dist/raidbots-wowaudit-tool.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build executable
+        run: >
+          pyinstaller --onefile --name raidbots-wowaudit-tool
+          --collect-all playwright --collect-all pyperclip
+          raidbots_wowaudit_tool.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.binary_path }}
