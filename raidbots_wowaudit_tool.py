@@ -79,6 +79,26 @@ DIFFICULTIES = [
     ("Mythic", "Myth"),
 ]
 
+# Alle Kombinationen der vier Sekundärstats, wie sie Raidbots unter
+# "Preferred Stats" anbietet - fest hinterlegt, damit danach gefragt werden
+# kann, bevor der Droptimizer überhaupt geöffnet wird.
+PREFERRED_STATS_OPTIONS = [
+    "Crit/Haste",
+    "Crit/Mastery",
+    "Crit/Vers",
+    "Haste/Crit",
+    "Haste/Mastery",
+    "Haste/Vers",
+    "Mastery/Crit",
+    "Mastery/Haste",
+    "Mastery/Vers",
+    "Vers/Crit",
+    "Vers/Haste",
+    "Vers/Mastery",
+]
+
+SETTINGS_PATH = os.path.join(_app_data_dir(), "settings.json")
+
 ITEMS_TO_SIM_TRUE_SELECTORS = [
     "input[type='checkbox'][name='includeConversions']",  # Include Catalyst Items
     "input[type='checkbox'][name='upgradeEquipped']",      # Upgrade All Equipped Gear (Pflicht für wowaudit)
@@ -190,6 +210,48 @@ def wait_for_enter(prompt: str) -> None:
         pass
 
 
+def ask_yes_no(prompt: str, default: bool = True) -> bool:
+    suffix = "[J/n]" if default else "[j/N]"
+    while True:
+        try:
+            raw = input(f"{prompt} {suffix}: ").strip().lower()
+        except EOFError:
+            return default
+        if raw == "":
+            return default
+        if raw in ("j", "ja", "y", "yes"):
+            return True
+        if raw in ("n", "nein", "no"):
+            return False
+        log("Bitte mit j/n antworten.")
+
+
+def load_last_setup() -> Optional[dict]:
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if (
+            isinstance(data.get("difficulty_index"), int)
+            and 0 <= data["difficulty_index"] < len(DIFFICULTIES)
+            and data.get("preferred_stats") in PREFERRED_STATS_OPTIONS
+        ):
+            return data
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def save_last_setup(difficulty_index: int, preferred_stats: str) -> None:
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                {"difficulty_index": difficulty_index, "preferred_stats": preferred_stats},
+                f,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def open_react_select(page, label_text):
     label = page.get_by_text(label_text, exact=False)
     control = label.locator(
@@ -210,7 +272,13 @@ def select_control_value(page, label_text) -> str:
     return control.inner_text().strip()
 
 
-def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, high_precision: bool) -> Optional[str]:
+def run_droptimizer(
+    simc_text: str,
+    difficulty_index: int,
+    preferred_stats: str,
+    simc_version: str,
+    high_precision: bool,
+) -> Optional[str]:
     difficulty_label = DIFFICULTIES[difficulty_index][0]
 
     with sync_playwright() as p:
@@ -293,17 +361,13 @@ def run_droptimizer(simc_text: str, difficulty_index: int, simc_version: str, hi
         else:
             log("WARNUNG: Konnte kein Upgrade-Level auswählen, bleibt bei Base level.")
 
-        # Preferred Stats: Optionen live von der Seite lesen und abfragen
+        log(f"Wähle Preferred Stats: {preferred_stats} ...")
         open_react_select(page, "Preferred Stats:")
-        stat_options = page.locator("[role='option']").all_inner_texts()
-        stat_options = [s.strip() for s in stat_options if s.strip()]
-        idx = ask_choice("Preferred Stats wählen:", stat_options, default_index=0)
-        chosen_stats = stat_options[idx]
-        page.locator("[role='option']", has_text=chosen_stats).first.click()
+        page.locator("[role='option']", has_text=preferred_stats).first.click()
         page.wait_for_timeout(300)
 
         # Preferred Gem passend zu Preferred Stats ableiten (enthält beide Stat-Kürzel)
-        stat_parts = re.split(r"[/ ]+", chosen_stats)
+        stat_parts = re.split(r"[/ ]+", preferred_stats)
         if len(stat_parts) >= 2:
             open_react_select(page, "Preferred Gem:")
             gem_option = page.locator("[role='option']")
@@ -468,17 +532,42 @@ def main() -> None:
     log("=== Inithium Raidbots -> wowaudit Tool ===")
     log()
 
-    ensure_chromium_installed()
-    simc_text = get_clipboard_text()
-
     diff_labels = [f"{a}/{b}" for a, b in DIFFICULTIES]
-    difficulty_index = ask_choice("Schwierigkeitsgrad wählen:", diff_labels, default_index=2)
+    last_setup = load_last_setup()
+
+    difficulty_index = None
+    preferred_stats = None
+
+    if last_setup is not None:
+        use_last = ask_yes_no(
+            "Letztes Setup verwenden? (Schwierigkeitsgrad: "
+            f"{diff_labels[last_setup['difficulty_index']]}, "
+            f"Preferred Stats: {last_setup['preferred_stats']})",
+            default=True,
+        )
+        if use_last:
+            difficulty_index = last_setup["difficulty_index"]
+            preferred_stats = last_setup["preferred_stats"]
+
+    if difficulty_index is None:
+        difficulty_index = ask_choice("Schwierigkeitsgrad wählen:", diff_labels, default_index=2)
+        stats_index = ask_choice(
+            "Preferred Stats wählen:", PREFERRED_STATS_OPTIONS, default_index=0
+        )
+        preferred_stats = PREFERRED_STATS_OPTIONS[stats_index]
+        save_last_setup(difficulty_index, preferred_stats)
 
     simc_version = "nightly"
     high_precision = True
 
     log()
-    result_url = run_droptimizer(simc_text, difficulty_index, simc_version, high_precision)
+    simc_text = get_clipboard_text()
+    ensure_chromium_installed()
+
+    log()
+    result_url = run_droptimizer(
+        simc_text, difficulty_index, preferred_stats, simc_version, high_precision
+    )
     if not result_url:
         wait_for_enter("\nFehlgeschlagen. Enter zum Beenden ...")
         sys.exit(1)
