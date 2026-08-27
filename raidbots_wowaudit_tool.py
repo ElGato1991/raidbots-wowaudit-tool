@@ -9,8 +9,10 @@ Inithium Raidbots -> wowaudit Tool
    startet die Simulation (Quelle: aktuelle Season-Raids, höchstmögliches
    Upgrade-Level, 'Upgrade All Equipped Gear to the Same Level' ist fest an,
    da wowaudit das voraussetzt).
-3. Lädt den fertigen Report automatisch bei wowaudit hoch
-   (Team Inithium, Blackmoore-EU).
+3. Lädt den fertigen Report automatisch über die offizielle wowaudit-API
+   hoch (POST /v1/wishlists) - kein Login, braucht nur den Team-API-Key
+   aus wowaudit (Team-Einstellungen -> API), einmalig abgefragt und lokal
+   gespeichert.
 
 Funktioniert unter Windows und Linux. Beim allerersten Start wird Chromium
 für Playwright automatisch heruntergeladen (einmalig, ca. 150-300 MB).
@@ -62,8 +64,7 @@ os.environ.setdefault(
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 RAIDBOTS_URL = "https://www.raidbots.com/simbot/droptimizer"
-WOWAUDIT_URL = "https://wowaudit.com/guild/eu/blackmoore/inithium/teams/inithium/loot/characters"
-SCREENSHOT_PATH = os.path.join(os.path.expanduser("~"), "wowaudit_upload_result.png")
+WOWAUDIT_API_URL = "https://wowaudit.com/v1/wishlists"
 
 FAILURE_PHRASES = [
     "Something is not quite right",
@@ -98,6 +99,7 @@ PREFERRED_STATS_OPTIONS = [
 ]
 
 SETTINGS_PATH = os.path.join(_app_data_dir(), "settings.json")
+API_KEY_PATH = os.path.join(_app_data_dir(), "wowaudit_api_key.txt")
 
 ITEMS_TO_SIM_TRUE_SELECTORS = [
     "input[type='checkbox'][name='includeConversions']",  # Include Catalyst Items
@@ -239,6 +241,42 @@ def load_last_setup() -> Optional[dict]:
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+def get_wowaudit_api_key() -> str:
+    try:
+        with open(API_KEY_PATH, "r", encoding="utf-8") as f:
+            key = f.read().strip()
+            if key:
+                return key
+    except Exception:  # noqa: BLE001
+        pass
+
+    log("wowaudit-API-Key nicht gefunden.")
+    log("Zu finden in wowaudit unter: Team-Einstellungen -> API.")
+    import getpass
+
+    while True:
+        try:
+            key = getpass.getpass("wowaudit API-Key einfügen: ").strip()
+        except EOFError:
+            key = ""
+        if key:
+            break
+        log("Leerer Key, bitte erneut versuchen.")
+
+    try:
+        with open(API_KEY_PATH, "w", encoding="utf-8") as f:
+            f.write(key)
+        os.chmod(API_KEY_PATH, 0o600)
+    except Exception:  # noqa: BLE001
+        pass
+    return key
+
+
+def extract_character_name(simc_text: str) -> Optional[str]:
+    m = re.search(r'^[a-z_]+="([^"]+)"', simc_text, re.MULTILINE)
+    return m.group(1) if m else None
 
 
 def save_last_setup(difficulty_index: int, preferred_stats: str) -> None:
@@ -440,91 +478,36 @@ def run_droptimizer(
         return result_url
 
 
-def really_logged_in(page) -> bool:
-    from urllib.parse import urlparse
+def upload_to_wowaudit(report_url: str, character_name: str, api_key: str) -> bool:
+    import urllib.error
+    import urllib.request
 
-    host = urlparse(page.url).hostname or ""
-    if host != "wowaudit.com":
+    report_id = report_url.rstrip("/").split("/")[-1]
+    payload = {
+        "report_id": report_id,
+        "character_name": character_name,
+        "configuration_name": "Single Target",
+        "replace_manual_edits": True,
+    }
+    req = urllib.request.Request(
+        WOWAUDIT_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return bool(body.get("created"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        log(f"wowaudit hat den Upload abgelehnt (HTTP {e.code}): {err_body}")
         return False
-    if page.get_by_text("Log in with", exact=False).count() > 0:
-        return False
-    if page.get_by_text("Not logged in", exact=False).count() > 0:
-        return False
-    return True
-
-
-def upload_to_wowaudit(report_url: str) -> bool:
-    profile_dir = os.path.join(_app_data_dir(), "wowaudit-browser-profile")
-
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            profile_dir, headless=False, viewport={"width": 1280, "height": 900}
-        )
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(WOWAUDIT_URL, wait_until="networkidle", timeout=60000)
-
-        if not really_logged_in(page):
-            log("Bitte im geöffneten Fenster bei wowaudit einloggen (Battle.net/Google) ...")
-            deadline = time.time() + 10 * 60
-            stable_hits = 0
-            logged_in = False
-            while time.time() < deadline:
-                page.wait_for_timeout(2000)
-                if really_logged_in(page):
-                    stable_hits += 1
-                    if stable_hits >= 2:
-                        logged_in = True
-                        break
-                else:
-                    stable_hits = 0
-            if not logged_in:
-                log("Zeitüberschreitung: kein Login erkannt.")
-                context.close()
-                return False
-            page.goto(WOWAUDIT_URL, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(1000)
-
-        log("Eingeloggt. Fülle Raidbots-Upload-Feld bei wowaudit ...")
-        page.get_by_text("Wishlist for", exact=False).wait_for(timeout=20000)
-        page.wait_for_timeout(500)
-
-        upload_another = page.get_by_text("Upload another", exact=False)
-        if upload_another.count() > 0:
-            upload_another.first.click()
-            page.wait_for_timeout(500)
-
-        go_button = page.get_by_role("button", name=re.compile("^go$", re.I))
-        if go_button.count() == 0:
-            page.screenshot(path=SCREENSHOT_PATH, full_page=True)
-            log(f"Konnte den 'Go'-Button bei wowaudit nicht finden. Screenshot: {SCREENSHOT_PATH}")
-            context.close()
-            return False
-
-        container = go_button.first.locator("xpath=ancestor::div[contains(@class,'relative')][1]")
-        target_input = container.locator("input[type='text']")
-        if target_input.count() == 0:
-            page.screenshot(path=SCREENSHOT_PATH, full_page=True)
-            log(f"Konnte das Raidbots-Upload-Feld bei wowaudit nicht finden. Screenshot: {SCREENSHOT_PATH}")
-            context.close()
-            return False
-
-        target_input.first.click()
-        target_input.first.fill(report_url)
-        go_button.first.click()
-        page.wait_for_timeout(3000)
-
-        uploaded = page.get_by_text("Your report has been uploaded", exact=False).count() > 0
-        rejected = page.get_by_text("Report must be run with", exact=False).count() > 0
-        page.screenshot(path=SCREENSHOT_PATH, full_page=True)
-        context.close()
-
-        if uploaded:
-            log(f"Upload bei wowaudit erfolgreich. Screenshot: {SCREENSHOT_PATH}")
-            return True
-        if rejected:
-            log(f"wowaudit hat den Report abgelehnt (Einstellungen passen nicht). Screenshot: {SCREENSHOT_PATH}")
-            return False
-        log(f"Unklarer Zustand nach dem Upload-Versuch bei wowaudit. Screenshot: {SCREENSHOT_PATH}")
+    except Exception as e:  # noqa: BLE001
+        log(f"Fehler beim wowaudit-Upload: {e}")
         return False
 
 
@@ -560,8 +543,16 @@ def main() -> None:
     simc_version = "nightly"
     high_precision = True
 
+    api_key = get_wowaudit_api_key()
+
     log()
     simc_text = get_clipboard_text()
+    character_name = extract_character_name(simc_text)
+    if not character_name:
+        log(
+            "WARNUNG: Konnte den Charakternamen nicht aus der Zwischenablage lesen - "
+            "der wowaudit-Upload wird vermutlich fehlschlagen."
+        )
     ensure_chromium_installed()
 
     log()
@@ -575,8 +566,8 @@ def main() -> None:
     log()
     log(f"Report-URL: {result_url}")
     log()
-    log("Lade Report bei wowaudit hoch ...")
-    ok = upload_to_wowaudit(result_url)
+    log(f"Lade Report bei wowaudit hoch (Charakter: {character_name}) ...")
+    ok = upload_to_wowaudit(result_url, character_name or "", api_key)
 
     log()
     if ok:

@@ -2,9 +2,8 @@
 
 Nimmt deinen SimC-Addon-Export aus der Zwischenablage, lässt ihn bei
 [Raidbots Droptimizer](https://www.raidbots.com/simbot/droptimizer)
-simulieren und lädt das Ergebnis automatisch bei
-[wowaudit](https://wowaudit.com/guild/eu/blackmoore/inithium/teams/inithium/loot/characters)
-für Team Inithium hoch.
+simulieren und lädt das Ergebnis automatisch über die offizielle
+[wowaudit-API](https://wowaudit.com/api) für Team Inithium hoch.
 
 ## Benutzung
 
@@ -12,13 +11,12 @@ für Team Inithium hoch.
 2. `raidbots-wowaudit-tool` (bzw. `raidbots-wowaudit-tool.exe` unter Windows)
    starten.
 3. Im Terminal-Fenster ein paar Fragen beantworten (Schwierigkeitsgrad,
-   Preferred Stats, SimC-Version, High Precision) — einfach Enter drücken
-   für die vorgeschlagenen Standardwerte.
-4. Das Tool öffnet den Sim automatisch im Hintergrund und lädt danach ein
-   sichtbares Browserfenster für wowaudit. Falls du dort noch nicht
-   eingeloggt bist, einmalig mit Battle.net oder Google einloggen — das
-   merkt sich das Tool für alle weiteren Läufe.
-5. Fertig — der Report ist bei wowaudit hochgeladen.
+   Preferred Stats) — einfach Enter drücken für die vorgeschlagenen
+   Standardwerte. Beim ersten Start wird einmalig der wowaudit-API-Key
+   abgefragt (zu finden in wowaudit unter Team-Einstellungen -> API) und
+   danach lokal gespeichert.
+4. Fertig — Sim läuft automatisch, Report wird automatisch bei wowaudit
+   hochgeladen.
 
 **Wichtig:** Beim allerersten Start lädt das Tool automatisch einen Chromium-
 Browser herunter (ca. 150–300 MB, einmalig, braucht Internet).
